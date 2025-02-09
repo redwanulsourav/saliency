@@ -11,8 +11,9 @@ import numpy as np
 from os import listdir
 from os.path import join
 
-if sys.version_info[0] != 2:
-	raise Exception("This script was written for Python version 2.  You're running Python %s." % sys.version)
+sys.path.append(os.path.dirname(os.path.abspath(__file__)) + "/..")
+
+from dataset.dataset_interface import DatasetInterface
 
 logger = logging.getLogger(__name__)
 
@@ -39,12 +40,12 @@ def features(image, channel, levels=9, start_size=(1983, 1088), ):
 		image = cv2.resize(image, dsize=start_size)
 
 	scales = [image]
-	for l in xrange(levels - 1):
+	for l in range(levels - 1):
 		logger.debug("scaling at level %d", l)
 		scales.append(cv2.pyrDown(scales[-1]))
 
 	features = []
-	for i in xrange(1, levels - 5):
+	for i in range(1, levels - 5):
 		big = scales[i]
 		for j in (3,4):
 			logger.debug("computing features for levels %d and %d", i, i + j)
@@ -102,7 +103,7 @@ def gaborConspicuity(image, steps):
 	"""
 		Creates the conspicuity map for the channel `orientations'.
 	"""
-	gaborConspicuity_ = numpy.zeros((1088, 1983), numpy.uint8)
+	gaborConspicuity_ = numpy.zeros((769, 1402), numpy.uint8)
 	for step in range(steps):
 		theta = step * (math.pi/steps)
 		gaborFilter = makeGaborFilter(dims=(10,10), lambd=2.5, theta=theta, psi=math.pi/2, sigma=2.5, gamma=.5)
@@ -149,8 +150,9 @@ def sumNormalizedFeatures(features, levels=9, startSize=(1983*8, 1088*8)):
 	"""
 	commonWidth = startSize[0] / 2**(levels/2 - 1)
 	commonHeight = startSize[1] / 2**(levels/2 - 1)
-	commonSize = commonWidth, commonHeight
+	commonSize = (round(commonWidth), round(commonHeight))
 	logger.info("Size of conspicuity map: %s", commonSize)
+	logger.info("features[0][1] type: %s", type(features[0][1]))
 	consp = N(cv2.resize(features[0][1], commonSize))
 	for f in features[1:]:
 		resized = N(cv2.resize(f[1], commonSize))
@@ -225,61 +227,76 @@ def markMaxima(saliency):
 
 
 if __name__ == "__main__":
-	logging.basicConfig(level=logging.DEBUG)
+	logging.basicConfig(level=logging.DEBUG, filename='itti.log')
 
 	import argparse
 	import sys
 	parser = argparse.ArgumentParser(description = "Simple Itti-Koch-style conspicuity.")
-	parser.add_argument('--fileList', type=str, dest='fileList', action='store', help='Text file containing input file names, one per line.')
-	parser.add_argument('--inputFile', type=str, dest='inputFile', action='store', help='File to compute saliency list for.')
-	parser.add_argument('--inputDir', type=str, dest='inputDir', action='store', help='Directory to compute saliency list for.  Need --fileList or --inputFile or --inputDir.')
-	parser.add_argument('--outputDir', type=str, dest='outputDir', action='store', help="Output directory for all maps.")
-	parser.add_argument("--markMaxima", action='store_true', help="Mark maximum saliency in output image.")
+	parser.add_argument('--videoPath', type = str, dest='videoPath', action='store')
 	args = parser.parse_args()
 
-	if args.fileList is None and args.inputFile is None and args.inputDir is None:
-		logger.error("Need either --fileList or --inputFile or --inputDir cmd line arguments.")
-		sys.exit()
-	else:
-		if args.fileList:
-			# we are reading filenames from a file.
-			filenames = (filename[:-1] for filename in open(args.fileList)) # remove end-of line character
-		elif args.inputFile:
-			# filenames were given on the command line.
-			filenames = [args.inputFile]
-		else:
-			# read filenames from directory.
-			filenames = [join(args.inputDir, f) for f in listdir(args.inputDir)]
+	datasetInterface = DatasetInterface('/data/rsourave/datasets/Coutrot/')
 
-		for filename in filenames:
-			im = cv2.imread(filename, cv2.COLOR_BGR2RGB) # assume BGR, convert to RGB---more intuitive code.
-			
-			if im is None:
-				logger.fatal("Could not load file \"%s.\"", filename)
-				sys.exit()
+	groundTruths = datasetInterface.getAllGazeOfSingleViewer(videoIdx = 0, viewerIdx = 0)
+	videoFrames = datasetInterface.getAllFrames(videoIdx = 0)
 
+	for i in range(0, len(groundTruths)):
+		if math.isnan(groundTruths[i][0]) or math.isnan(groundTruths[i][1]):
+			previousExists = None 
+			if i > 0: 
+				previousExists = True 
+			else: 
+				previousExists = False
 
-			intensty = intensityConspicuity(im)
-			gabor = gaborConspicuity(im, 4)
+			nextExists = None
+			if i < len(groundTruths) - 1: 
+				nextExists = True 
+			else: 
+				nextExists = False
+            
+			if previousExists == False and nextExists == False:
+				groundTruths[i][0] = 0
+				groundTruths[i][1] = 0
+			elif previousExists == False and nextExists == True:
+				groundTruths[i] = groundTruths[i + 1]
+			elif previousExists == True and nextExists == False:
+				groundTruths[i] = groundTruths[i - 1]
+			else:
+				groundTruths[i][0] = (groundTruths[i-1][0] + groundTruths[i + 1][0]) / 2
+				groundTruths[i][1] = (groundTruths[i - 1][0] + groundTruths[i + 1][0]) / 2
+	
+	errorSum = 0
+	n = len(videoFrames)
 
-			im = makeNormalizedColorChannels(im)
-			rg = rgConspicuity(im)
-			by = byConspicuity(im)
-			c = rg + by
-			saliency = 1./3 * (N(intensty) + N(c) + N(gabor))
+	for i, im in enumerate(videoFrames):
+		intensty = intensityConspicuity(im)
+		gabor = gaborConspicuity(im, 4)
 
-			if args.markMaxima:
-				saliency = markMaxima(saliency)
+		im = makeNormalizedColorChannels(im)
+		rg = rgConspicuity(im)
+		by = byConspicuity(im)
+		c = rg + by
+		saliency = 1./3 * (N(intensty) + N(c) + N(gabor))
 
-			def writeCond(outputDir, image, desc='saliency'):
-				name, ext = os.path.splitext(os.path.basename(filename))
-				if outputDir:
-					cv2.imwrite(join(outputDir, name + '_' + desc + '_maxima' + ext), image)
-			'''
-			writeCond(args.outputDir, intensty, 'intensity')
-			writeCond(args.outputDir, gabor, 'gabor')
-			writeCond(args.outputDir, rg, 'rg')
-			writeCond(args.outputDir, by, 'by')
-			writeCond(args.outputDir, .25 * c, 'c')
-			'''
-			writeCond(args.outputDir, saliency)
+		fixationPt = np.argmax(saliency)
+		fixationPt = np.unravel_index(fixationPt, saliency.shape)
+
+		fixationPt = list(fixationPt)
+		groundTruth = list(groundTruths[i])
+		# print(fixationPt)
+		# print(groundTruth)
+		fixationPt[0] /= saliency.shape[0]
+		fixationPt[1] /= saliency.shape[1]
+		
+		groundTruth[0] /= im.shape[0]
+		groundTruth[1] /= im.shape[1]
+
+		currentLoss = np.hypot(fixationPt[0] - groundTruth[0], fixationPt[1] - groundTruth[1])
+
+		logger.info(f'Frame no. {i}: loss = {currentLoss}')
+
+		errorSum += currentLoss
+	
+		# read, im = cap.read()
+
+	logger.info(f'Average loss: {errorSum / n}')
